@@ -1,0 +1,5 @@
+name = Braintree Subscription
+description = Provide Braintree subscription integration.
+package = Braintree
+core = 7.x
+dependencies[] = braintree_vault

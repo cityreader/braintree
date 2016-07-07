@@ -1,0 +1,665 @@
+<?php
+/**
+ * @file
+ * Provides integration with Braintree core functions.
+ */
+
+define('BRAINTREE_ADMIN_PATH', 'admin/config/services/braintree');
+
+/**
+ * Implements hook_init().
+ */
+function braintree_init() {
+  // Avoid "can't use nonce more than once" error if page is reloaded (with same $_POST)
+  if (isset($_POST['payment_method_nonce'])) {
+    if (!isset($_SESSION['payment_method_nonce']) || $_POST['payment_method_nonce'] != $_SESSION['payment_method_nonce']) {
+      $_SESSION['payment_method_nonce'] = $_POST['payment_method_nonce'];
+    }
+    else {
+      unset($_SESSION['payment_method_nonce']);
+      // Reload without $_POST to stop payment form from submitting with already used nonce
+      drupal_goto(current_path());
+    }
+  }
+}
+
+/**
+ * Implements hook_help().
+ */
+function braintree_help($path, $arg) {
+  switch ($path) {
+    // Main module help for admin settings page
+    case BRAINTREE_ADMIN_PATH . '/settings':
+      $url = url('https://articles.braintreepayments.com/control-panel/important-gateway-credentials#merchant-account-id',
+        array('absolute' => TRUE)
+      );
+      return '<p>' . t('Merchant account ID: log into the Control Panel of Braintree; navigate to Settings > Processing > Merchant Accounts. Read more information on <a href="@url">Braintree page</a>.', array('@url' => $url)) . '</p>';
+
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function braintree_menu() {
+  $items[BRAINTREE_ADMIN_PATH] = array(
+    'title' => 'Braintree',
+    'description' => 'Braintree settings.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('braintree_admin_settings'),
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree.admin.inc',
+    'type' => MENU_NORMAL_ITEM,
+  );
+  $items[BRAINTREE_ADMIN_PATH . '/settings'] = array(
+    'title' => 'Gateway settings',
+    'description' => 'Setup up Braintree merchant ID and API keys.',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => 0,
+  );
+  return $items;
+}
+
+/**
+ * Implements hook_mail().
+ */
+function braintree_mail($key, &$message, $params) {
+  if ($key == 'transaction_fraud') {
+    $order = $params['order'];
+    $message['subject'] = t('Transaction fraud risk marked @decision', array('@decision' => $params['decision']));
+
+    // Fraud risk decision
+    $message['body'][] = t('Decision: @decision', array('@decision' => $params['decision']));
+
+    // Link to view order
+    $message['body'][] = t('Order: !order_link', array('!order_link' => l(t('view'), 'admin/commerce/orders/' . $order->order_id, array('absolute' => TRUE))));
+
+    // Link to view braintree transaction
+    if (!empty($params['txn_id'])) {
+      $braintree_settings = variable_get('braintree_settings');
+      $bt_env = $braintree_settings['environment'];
+      $subdomain = ($bt_env == 'sandbox') ? 'sandbox' : 'www';
+      $bt_url = 'https://' . $subdomain . '.braintreegateway.com/merchants/' . $braintree_settings[$bt_env]['merchant_id'] . '/transactions/' . $params['txn_id'];
+      $message['body'][] = t('Transaction: !braintree_link', array('!braintree_link' => l(t('view'), $bt_url)));
+    }
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function braintree_permission() {
+  return array(
+    'administer braintree settings' => array(
+      'title' => t('Administer Braintree settings'),
+      'description' => t('Setup up Braintree merchant ID and API keys.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_libraries_info().
+ *
+ * Define braintree_php library. Note: this library is also defined in
+ * commerce_braintree module.
+ */
+function braintree_libraries_info() {
+  $libraries['braintree_php'] = array(
+    'name' => 'BrainTree PHP',
+    'vendor url' => 'https://www.braintreepayments.com/docs/php',
+    'download url' => 'https://github.com/braintree/braintree_php',
+    'version arguments' => array(
+      'file' => 'CHANGELOG.md',
+      'pattern' => '/^##\s+(.+)$/',
+      'lines' => 1,
+    ),
+    'files' => array(
+      'php' => array('lib/Braintree.php'),
+    ),
+  );
+  return $libraries;
+}
+
+/**
+ * Implements hook_hook_info().
+ */
+function braintree_hook_info() {
+  $hooks = array(
+    'braintree_transaction_sale_data_alter',
+    'braintree_transaction_sale_complete',
+  );
+  foreach ($hooks as $hook) {
+    $hook_info[$hook] = array(
+      'group' => 'braintree',
+    );
+  };
+  return $hook_info;
+}
+
+/**
+ * Get Braintree settings.
+ *
+ * @param null $type
+ * @return array
+ */
+function braintree_settings($type = NULL) {
+  static $cache;
+
+  if (is_null($cache)) {
+    $default_settings = array(
+      'environment' => 'sandbox',
+      'sandbox' => array(
+        'merchant_id' => '',
+        'public_key' => '',
+        'private_key' => '',
+        'merchant_account_id' => '',
+      ),
+      'production' => array(
+        'merchant_id' => '',
+        'public_key' => '',
+        'private_key' => '',
+        'merchant_account_id' => '',
+      ),
+    );
+
+    $settings = variable_get('braintree_settings', array());
+
+    $cache = array_merge($default_settings, $settings);
+  }
+
+  if (is_null($type)) {
+    $type = 'all';
+  }
+
+  if ($type == 'active') {
+    $environment = $cache['environment'];
+
+    $return = $cache[$environment];
+    $return['environment'] = $environment;
+    return $return;
+  }
+
+  return $cache;
+}
+
+/**
+ * Configure braintree_php library.
+ *
+ * @param null $settings
+ */
+function braintree_initialize($settings = NULL) {
+  static $booted = FALSE;
+
+  if ($booted) {
+    return;
+  }
+
+  libraries_load('braintree_php');
+
+  if (is_null($settings)) {
+    $settings = braintree_settings('active');
+  }
+
+  Braintree_Configuration::merchantId($settings['merchant_id']);
+  Braintree_Configuration::publicKey($settings['public_key']);
+  Braintree_Configuration::privateKey($settings['private_key']);
+  Braintree_Configuration::environment($settings['environment']);
+
+  $booted = TRUE;
+}
+
+/**
+ * Process error message when Braintree throws an exception.
+ *
+ * @param $exception
+ * @param bool|FALSE $admin
+ * @return mixed|null|string
+ */
+function braintree_exception_error_message($exception, $admin = FALSE) {
+  braintree_last_error($exception);
+
+  $message = $exception->getMessage();
+
+  if (empty($message)) {
+    $class = get_class($exception);
+    $admin_message = str_replace('Braintree_Exception_', '', $class);
+
+    if ($admin) {
+      $message = $admin_message;
+    }
+    else {
+      $message = t('Unknown error happened. Please try again or contact us for help.');
+    }
+  }
+  else {
+    $admin_message = $message;
+  }
+
+  $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
+  $caller = _drupal_get_last_caller($backtrace);
+
+  $variables = array(
+    '@message' => $admin_message,
+    '%function' => $caller['function'],
+    '%file' => $caller['file'],
+    '%line' => $caller['line'],
+    '%data' => $backtrace[1]['function'],
+  );
+  $admin_message = 'API exception: @message in %function (line %line of %file). Exception: @data';
+
+  watchdog('braintree api', $admin_message, $variables, WATCHDOG_CRITICAL);
+
+  return $message;
+}
+
+/**
+ * Process error message of Braintree failed request.
+ *
+ * @param $result
+ * @return null|string
+ */
+function braintree_result_error_message($result) {
+  braintree_last_result($result);
+
+  // The error message provided by Braintree is fairly user-friendly. We just
+  // expose this message to end-user. Improve it when we get unfriendly message.
+  // @see https://developers.braintreepayments.com/reference/general/validation-errors/all/php#customer
+  $message = t('@message Please try to fix the problem and try again, or contact Zoos Victoria by phone on 1300 966 784.', array(
+    '@message' => $result->message,
+  ));
+
+  $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2);
+
+  $variables = array(
+    '@message' => $result->message,
+    '@name' => $backtrace[1]['function'],
+    '!data' => substr(print_r($result, TRUE), 0, 10000),
+  );
+  $admin_message = 'API error: @message in function @name <br><pre>!data</pre>';
+
+  watchdog('braintree api', $admin_message, $variables, WATCHDOG_NOTICE);
+
+  return $message;
+}
+
+/**
+ * Gets the payment_method_nonce from the post variables if it exists.
+ */
+function braintree_get_nonce() {
+  return !empty($_POST['payment_method_nonce']) ? check_plain($_POST['payment_method_nonce']) : NULL;
+}
+
+/**
+ * Return last result of Braintree query.
+ *
+ * @param null|\Braintree\Result\Successful|\Braintree\Result\Error $result
+ * @return null
+ */
+function braintree_last_result($result = NULL) {
+  static $last;
+
+  if (!is_null($result)) {
+    $last = $result;
+  }
+
+  return $last;
+}
+
+/**
+ * Return last error of Braintree.
+ *
+ * @param null $exception
+ * @return null
+ */
+function braintree_last_error($exception = NULL) {
+  static $last;
+
+  if (!is_null($exception)) {
+    $last = $exception;
+  }
+
+  return $last;
+}
+
+/**
+ * Create Braintree transaction sale.
+ *
+ * @param $sale_data
+ * @param array $context
+ * @param string $error_message
+ * @return array|bool
+ */
+function braintree_transaction_sale(&$sale_data, &$context = array(), &$error_message = '') {
+  // Allow other modules to alter the sale before sending it to Braintree.
+  drupal_alter('braintree_transaction_sale_data', $sale_data, $context);
+
+  try {
+
+    // Add fraud protection - ZVT-25
+    // For CC transactions, and Paypal non-recurring vault transactions
+    // see https://developers.braintreepayments.com/guides/paypal/vault/javascript/v2#collecting-device-data
+    // Just CC for now (we don't use any Paypal non-recurring vault transxns?)
+    // device_data hidden input is added to form via braintree.prototype.getOptions() in braintree_payment.js
+    $order = isset($context['order']) ? $context['order'] : NULL;
+    $payment_method = $order ? explode('|', $order->data['payment_method']) : array();
+    $payment_method = reset($payment_method);
+    if ($payment_method == 'braintree_hostedfields' && !empty($_POST['device_data'])) {
+      $sale_data['deviceData'] = $_POST['device_data'];
+      // This can be added for extra protection - but ONLY when fraud protection is enabled via the Braintree admin UI
+      // It is optional - comment out for now, complains 'invalid key if added
+      //$fraud_mail = valid_email_address($customer_mail) ? $customer_mail : 'noemail@kount.com';
+      //$sale_data['customerEmail'] = $fraud_mail;
+    }
+
+    // Execute the API sale method to create a sale object.
+    $result = Braintree_Transaction::sale($sale_data);
+    $context['result'] = $result;
+  }
+  catch (Exception $e) {
+    $error_message = braintree_exception_error_message($e);
+    form_set_error('braintree', $error_message);
+    return FALSE;
+  }
+
+  if (!braintree_check_fraud($context)) {
+    // Form errors are set in that function
+    return FALSE;
+  }
+
+  if ($context['result']->success) {
+    // Invoke post hook when sale is completed successfully.
+    foreach (module_implements('braintree_transaction_sale_complete') as $module) {
+      $function = $module . '_braintree_transaction_sale_complete';
+      $function($result, $context);
+    }
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  form_set_error('braintree', $error_message);
+  return FALSE;
+}
+
+/**
+ * Create Braintree transaction sale for authorization.
+ *
+ * @param \Braintree\Customer $customer
+ *   An object of Braintree Customer object.
+ * @param string $price
+ *   A string of subscription price.
+ * @param array $data
+ *   An associative array of sale data.
+ *
+ * @return array|bool
+ */
+function braintree_transaction_authorize($customer, $price, $data = []) {
+  $settings = braintree_settings('active');
+  $payment_method = braintree_customer_default_payment_method($customer);
+
+  $sale_data = array(
+    'amount' => $price,
+    'merchantAccountId' => $settings['merchant_account_id'],
+    'paymentMethodToken' => $payment_method->token,
+    'customerId' => $customer->id,
+    'options' => array(
+      'submitForSettlement' => FALSE,
+    ),
+  );
+
+  // Add extra values like custom fields.
+  $sale_data = array_merge($sale_data, $data);
+
+  $context = array();
+  $result = braintree_transaction_sale($sale_data, $context, $error_message);
+  return $result;
+}
+
+/**
+ * Void a Braintree transaction.
+ *
+ * @param $transaction_id
+ * @param string $error_message
+ * @return bool|object
+ */
+function braintree_transaction_void($transaction_id, &$error_message = '') {
+  try {
+    // Execute the API sale method to create a sale object.
+    $result = Braintree_Transaction::void($transaction_id);
+  }
+  catch (Exception $e) {
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Return a list of authorized transactions of a customer.
+ *
+ * @param $customer
+ * @return mixed
+ */
+function braintree_authorized_transactions($customer) {
+  try {
+    $collection = Braintree_Transaction::search(array(
+      Braintree_TransactionSearch::customerId()->is($customer->id),
+      Braintree_TransactionSearch::status()->in(
+        array(
+          Braintree_Transaction::AUTHORIZED
+        )
+      )
+    ));
+  }
+  catch (Exception $e) {
+    braintree_last_error($e);
+    return FALSE;
+  }
+
+  return $collection;
+}
+
+/**
+ * Load Braitnree transaction by ID.
+ *
+ * @param $transaction_id
+ * @return bool
+ */
+function braintree_transaction_find($transaction_id) {
+  try {
+    // Execute the API sale method to create a sale object.
+    $transaction = Braintree_Transaction::find($transaction_id);
+  }
+  catch (Exception $e) {
+    braintree_last_error($e);
+    return FALSE;
+  }
+
+  return $transaction;
+}
+
+/**
+ * Check payment method is credit card.
+ *
+ * @param $payment_method
+ *
+ * @return bool
+ */
+function braintree_payment_method_is_credit_card($payment_method) {
+  $class = get_class($payment_method);
+  return strpos($class, 'CreditCard') !== FALSE;
+}
+
+/**
+ * Check payment method is PayPal.
+ *
+ * @param \Braintree\PayPalAccount|\Braintree\CreditCard $payment_method
+ *   An object of Braintree payment method.
+ *
+ * @return bool
+ */
+function braintree_payment_method_is_paypal($payment_method) {
+  $class = get_class($payment_method);
+  return strpos($class, 'PayPalAccount') !== FALSE;
+}
+
+/**
+ * Get subscription ID from an order.
+ *
+ * @param $order
+ *
+ * @return bool
+ */
+function braintree_commerce_order_subscription_id($order) {
+  if (isset($order->data['braintree_subscription_id'])) {
+    return $order->data['braintree_subscription_id'];
+  }
+
+  $subscription_id = braintree_commerce_payment_transaction_remote_id($order);
+  return $subscription_id;
+}
+
+/**
+ * Get remote ID of payment transaction from order.
+ *
+ * When creating a Braintree transaction sale, remote ID is transaction ID;
+ * when creating a Braintree subscription, remote ID is subscription ID.
+ *
+ * @param $order
+ * @return bool
+ */
+function braintree_commerce_payment_transaction_remote_id($order) {
+  $payments = commerce_payment_transaction_load_multiple(array(), array('order_id' => $order->order_id, 'status' => 'success'));
+  if ($payments) {
+    // If you just have one and that's all you want...
+    $payment = array_shift($payments);
+    return $payment->remote_id;
+  }
+
+  return FALSE;
+}
+
+/**
+ * Braintree debug tool.
+ *
+ * @require devel_file module
+ */
+function braintree_df($data, $label = NULL) {
+  static $file_name;
+
+  if (function_exists('bdf') && variable_get('braintree_debug', 0)) {
+    if (is_null($file_name)) {
+      $file_name = sprintf('%s.txt', date('Ymd-H:i:s'));
+      $file_name = '/braintree/' . $file_name;
+    }
+
+    df($data, $label, $file_name);
+  }
+}
+
+/**
+ * @return bool
+ */
+function braintree_is_sandbox() {
+  $settings = braintree_settings('active');
+  return $settings['environment'] == 'sandbox';
+}
+
+/**
+ * Get time offset of two timezone.
+ *
+ * @param $remote_tz
+ *   It defaults to Braintree local timezone.
+ * @param null $origin_tz
+ * @return bool|int
+ */
+function braintree_get_timezone_offset($remote_tz = 'America/Chicago', $origin_tz = NULL) {
+  if($origin_tz === NULL) {
+    if(!is_string($origin_tz = date_default_timezone_get())) {
+      return FALSE; // A UTC timestamp was returned -- bail out!
+    }
+  }
+  $origin_dtz = new DateTimeZone($origin_tz);
+  $remote_dtz = new DateTimeZone($remote_tz);
+  $origin_dt = new DateTime("now", $origin_dtz);
+  $remote_dt = new DateTime("now", $remote_dtz);
+  $offset = $origin_dtz->getOffset($origin_dt) - $remote_dtz->getOffset($remote_dt);
+  return $offset;
+}
+
+function braintree_date_fix($braintree_date_obj) {
+  if (braintree_is_sandbox()) {
+    $offset_time = braintree_get_timezone_offset();
+    $braintree_date_obj->add(new DateInterval('PT' . $offset_time . 'S'));
+  }
+
+  return $braintree_date_obj;
+}
+
+/**
+ * Helper to check a transaction response for fraud
+ *
+ * @param $sale_data
+ * @param $context
+ *
+ * @return bool - whether the transaction passes or not
+ */
+function braintree_check_fraud(&$context) {
+  $result =& $context['result'];
+
+  // Check for fraud-protection-declined transactions
+  // NB for the sandbox fraud testing CC number, the sandbox doesn't add riskData, just rejects the transaction flat
+  // Let's add the property here so we can test the alert email etc.
+  $braintree_settings = variable_get('braintree_settings');
+
+  if ($braintree_settings['environment'] == 'sandbox' && isset($result->transaction->creditCard)
+    && $result->transaction->creditCard['bin'] == '400011' && $result->transaction->creditCard['last4'] == '1511'
+  ) {
+    $result->transaction->riskData = (object) array(
+      'decision' => 'Decline',
+      'id' => NULL
+    );
+  }
+
+  // NB braintree result must use magic getters, property_exists doesn't work here
+  if (!empty($result->transaction->riskData)) {
+    $decision = $result->transaction->riskData->decision;
+
+    // Send an alert email for Decline/Review
+    if ($decision == 'Review') {
+      $from = variable_get('site_mail');
+      // To: use dev address if braintree env is sandbox
+      $braintree_env_settings = isset($braintree_settings['environment'])
+        ? $braintree_settings[$braintree_settings['environment']] : array();
+      $to = $braintree_env_settings['alert_email'] ?: variable_get('site_mail');
+      $params = array(
+        'order' => $context['order'],
+        'txn_id' => $result->transaction->id,
+        'decision' => $decision,
+      );
+      $lang = language_default();
+
+      if ($from && $to) {
+        drupal_mail('braintree', 'transaction_fraud', $to, $lang, $params, $from);
+      }
+    }
+
+    // Set form error for Decline
+    if ($decision == 'Decline') {
+      form_set_error('braintree', t('Sorry, your payment transaction was declined. Please contact the sales team on 03 9285 9788'));
+      return FALSE;
+    }
+
+    // Set success for Review
+    if ($decision == 'Review') {
+      $result->success = TRUE;
+    }
+  }
+
+  return TRUE;
+}

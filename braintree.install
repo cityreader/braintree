@@ -1,0 +1,16 @@
+<?php
+
+/**
+ * Implements hook_uninstall().
+ */
+function braintree_uninstall() {
+  variable_del('braintree_settings');
+  variable_del('braintree_debug');
+}
+
+/**
+ * Enable new dependent module static_cache.
+ */
+function braintree_update_7100() {
+  module_enable(array('static_cache'));
+}

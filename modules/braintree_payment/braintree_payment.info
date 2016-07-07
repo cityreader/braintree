@@ -1,0 +1,5 @@
+name = Braintree Payment
+description = Provide Braintree payment form.
+package = Braintree
+core = 7.x
+dependencies[] = braintree

@@ -1,0 +1,704 @@
+<?php
+/**
+ * @file
+ * Provides integration with Braintree vault functions.
+ */
+
+/**
+ * Implements hook_help().
+ */
+function braintree_vault_help($path, $arg) {
+  switch ($path) {
+    // Main module help for admin settings page
+    case BRAINTREE_ADMIN_PATH . '/vault':
+      return '<p>' . t('Store customer ID of Braintree vault in the custom form.') . '</p>';
+  }
+}
+
+/**
+ * Implements hook_init().
+ */
+function braintree_vault_init() {
+  if (strpos(current_path(), braintree_payment_method_base_url()) === 0) {
+    braintree_initialize();
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function braintree_vault_menu() {
+  $items[BRAINTREE_ADMIN_PATH . '/vault'] = array(
+    'title' => t('Braintree vault'),
+    'description' => t('Setup up Braintree vault ID.'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('braintree_vault_admin_settings'),
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree_vault.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 10,
+  );
+
+  $base_url = braintree_payment_method_base_url();
+
+  // This is just here for the sake of people searching the code for these paths
+  // dashboard/payment_methods/%/edit
+  // dashboard/payment_methods/add
+  // dashboard/payment_methods/%/remove
+  // dashboard/payment_methods/%/make_default
+
+  if (empty($base_url)) {
+    drupal_set_message('Braintee payment method base URL is not right, click <a href="@url">here</a> to fix it.', array(
+      '@url' => url(BRAINTREE_ADMIN_PATH . '/vault'),
+    ));
+  }
+  else {
+    $position = count(explode('/', $base_url));
+
+    $items[$base_url . '/add'] = array(
+      'title' => 'Add new payment type',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('braintree_payment_method_form', 'add'),
+      'access arguments' => array('manage braintree payment method'),
+      'file' => 'braintree_vault.pages.inc',
+    );
+    $items[$base_url . '/%/edit'] = array(
+      'title' => 'Edit payment method',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('braintree_payment_method_form', 'edit', $position),
+      'access arguments' => array('manage braintree payment method'),
+      'file' => 'braintree_vault.pages.inc',
+    );
+    $items[$base_url . '/%/remove'] = array(
+      'title' => 'Remove payment method',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('braintree_payment_method_remove_form', $position),
+      'access arguments' => array('manage braintree payment method'),
+      'file' => 'braintree_vault.pages.inc',
+    );
+    $items[$base_url . '/%/make_default'] = array(
+      'title' => 'Make primary payment method',
+      'page callback' => 'drupal_get_form',
+      'page arguments' => array('braintree_payment_method_make_default_form', $position),
+      'access arguments' => array('manage braintree payment method'),
+      'file' => 'braintree_vault.pages.inc',
+    );
+
+    if (variable_get('braintree_use_payment_methods_page', TRUE)) {
+      $items[$base_url] = array(
+        'title' => 'Payment details',
+        'page callback' => 'braintree_payment_methods_page',
+        'access arguments' => array('manage braintree payment method'),
+        'file' => 'braintree_vault.pages.inc',
+      );
+    }
+  }
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function braintree_vault_permission() {
+  return array(
+    'manage braintree payment method' => array(
+      'title' => t('Manage Braintree payment method'),
+      'description' => t('Allow user to manage their Braintree payment method.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function braintree_vault_theme($existing, $type, $theme, $path) {
+  return array(
+    'braintree_payment_methods' => array(
+      'variables' => array(
+        'customer' => NULL
+      ),
+      'template' => 'braintree-payment-methods',
+      'file' => 'braintree_vault.theme.inc',
+    ),
+    'braintree_payment_method' => array(
+      'variables' => array(
+        'payment_method' => NULL,
+        'delta' => NULL,
+        'is_default' => FALSE,
+        'has_links' => FALSE
+      ),
+      'template' => 'braintree-payment-method',
+      'file' => 'braintree_vault.theme.inc',
+    ),
+    'braintree_payment_method_label' => array(
+      'variables' => array(
+        'payment_method' => NULL,
+        'delta' => NULL
+      ),
+      'file' => 'braintree_vault.theme.inc',
+    ),
+  );
+}
+
+/**
+ * Implements hook_hook_info().
+ */
+function braintree_vault_hook_info() {
+  $hooks = array(
+    'braintree_vault_customer_data_alter',
+    'braintree_vault_customer_saved',
+    'braintree_vault_payment_method_alter',
+    'braintree_vault_payment_method_saved',
+    'braintree_vault_payment_method_delete',
+    'braintree_vault_payment_method_make_default',
+  );
+  foreach ($hooks as $hook) {
+    $hook_info[$hook] = array(
+      'group' => 'braintree',
+    );
+  };
+  return $hook_info;
+}
+
+/**
+ * Look up Braintree customer object by Drupal account.
+ *
+ * @param $account
+ * @param bool|FALSE $reset
+ *
+ * @return bool|\Braintree_Customer
+ */
+function braintree_customer_load_by_account($account, $reset = FALSE) {
+  return static_cache_get('braintree_customer_cache', $account->uid, $reset, function() use ($account) {
+    if ($customer_id = braintree_customer_id($account)) {
+      $customer = braintree_customer_load($customer_id);
+      return $customer;
+    }
+
+    return FALSE;
+  });
+}
+
+/**
+ * Look up Braintree customer object bu customer ID.
+ *
+ * @param $customer_id
+ *
+ * @return bool|\Braintree_Customer
+ */
+function braintree_customer_load($customer_id) {
+  braintree_initialize();
+  $customer = Braintree_Customer::find($customer_id);
+  return $customer;
+}
+
+/**
+ * Manually reset customer cache data.
+ *
+ * @param $uid
+ */
+function braintree_customer_cache_reset($uid) {
+  $customers =& drupal_static('braintree_customer_cache', array());
+  $customers[$uid] = NULL;
+}
+
+/**
+ * Get Braintree customer ID from a user account.
+ *
+ * @param null $account
+ * @return bool
+ */
+function braintree_customer_id($account = NULL) {
+  if (is_null($account)) {
+    global $user;
+    $account = $user;
+  }
+
+  if ($account->uid == 0) {
+    return FALSE;
+  }
+
+  $customer_id = FALSE;
+
+  if ($vault_field = variable_get('braintree_vault_field', '')) {
+    $userWrapper = entity_metadata_wrapper('user', $account);
+    $customer_id = $userWrapper->{$vault_field}->value();
+  }
+
+  drupal_alter('braintree_customer_id', $customer_id, $account);
+
+  return $customer_id;
+}
+
+/**
+ * Save Braintree customer ID in a user account.
+ *
+ * @param $account
+ * @param $customer_id
+ * @return bool
+ *
+ * @deprecated
+ * @TODO need refactor
+ */
+function braintree_customer_id_save($account, $customer_id) {
+  $user_wrapper = entity_metadata_wrapper('user', $account);
+  if ($vault_field = variable_get('braintree_vault_field', '')) {
+    $user_wrapper->{$vault_field}->set($customer_id);
+    $user_wrapper->save();
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/**
+ * Return default payment method from a customer.
+ *
+ * @param $customer
+ * @return bool
+ */
+function braintree_customer_default_payment_method($customer) {
+  foreach ($customer->paymentMethods as $payment_method) {
+    if (braintree_payment_method_is_default($payment_method)) {
+      return $payment_method;
+    }
+  }
+  return FALSE;
+}
+
+/**
+ * Check if it is default payment method.
+ *
+ * @param $payment_method
+ * @return bool
+ */
+function braintree_payment_method_is_default($payment_method) {
+  return $payment_method->default == 1;
+}
+
+function braintree_payment_method_load_in_account($token, $account) {
+  $customer = braintree_customer_load_by_account($account);
+
+  foreach ($customer->paymentMethods as $payment_method) {
+    if ($payment_method->token == $token) {
+      return $payment_method;
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Return payment method of an account by delta.
+ *
+ * @param $delta
+ * @param null $account
+ * @return bool
+ */
+function braintree_payment_method_load_by_delta($delta, $account = NULL) {
+  if (is_null($account)) {
+    global $user;
+    $account = $user;
+  }
+
+  $customer = braintree_customer_load_by_account($account);
+  if ($customer) {
+    $payment_methods = braintree_payment_methods_sorted($customer->paymentMethods);
+    if (isset($payment_methods[$delta])) {
+      return $payment_methods[$delta];
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Return sorted list of payment method of a customer.
+ *
+ * It is noted that the delta of payment methods returned by Braintree varies
+ * quite randomly and is not reliable, so we sort all payment methods by created
+ * time and get new delta to use.
+ *
+ * @param $payment_methods
+ * @return array
+ */
+function braintree_payment_methods_sorted($payment_methods) {
+  // Sort payment method by created date, as Braintree does not return
+  // consistent orders of payment methods.
+  uasort($payment_methods, '_braintree_sort_by_created_date');
+  // Reset delta.
+  $payment_methods = array_values($payment_methods);
+  return $payment_methods;
+}
+
+/**
+ * Helper function to compare created time of two payment method.
+ *
+ * @param $a
+ * @param $b
+ * @return int
+ */
+function _braintree_sort_by_created_date($a, $b) {
+  if ($a->createdAt == $b->createdAt) {
+    return 0;
+  }
+
+  return $a->createdAt < $b->createdAt ? -1 : 1;
+}
+
+function braintree_payment_method_options($payment_methods) {
+  $options = array();
+  foreach ($payment_methods as $payment_method) {
+    if (braintree_payment_method_is_credit_card($payment_method)) {
+      $label = t('@card_type ending in @last4', [
+        '@card_type' => $payment_method->cardType,
+        '@last4' => $payment_method->last4,
+      ]);
+    }
+    elseif (braintree_payment_method_is_paypal($payment_method)) {
+      $label = t('PayPal @email', [
+        '@email' => $payment_method->email,
+      ]);
+    }
+    else {
+      // @TODO support other payment method types.
+      $label = $payment_method->token;
+    }
+
+    $options[$payment_method->token] = $label;
+  }
+
+  return $options;
+}
+
+function braintree_payment_method_base_url() {
+  return variable_get('braintree_payment_base_url', 'payment_methods');
+}
+
+/**
+ * Interpolate payment operation URL.
+ *
+ * @param $action
+ * @param null $delta
+ * @return string
+ */
+function braintree_payment_method_url($action, $delta = NULL) {
+  $url = braintree_payment_method_base_url() . '/';
+
+  switch ($action) {
+    case 'add':
+      $url .= $action;
+      break;
+    case 'edit':
+    case 'make_default':
+    case 'remove':
+      $url .= $delta . '/' . $action;
+      break;
+    case 'list':
+
+      break;
+  }
+
+  return $url;
+}
+
+/**
+ * Get payment method list page.
+ *
+ * @param bool|FALSE $form_redirect
+ * @param bool|FALSE $render
+ * @return array|string
+ */
+function braintree_payment_method_list_url($form_redirect = FALSE, $render = FALSE) {
+  if (variable_get('braintree_use_payment_methods_page', 1)) {
+    $url = braintree_payment_method_base_url();
+
+    if ($render) {
+      $url = url($url);
+    }
+  }
+  else {
+    $url = braintree_payment_methods_custom_page($form_redirect, $render);
+  }
+
+  return $url;
+}
+
+/**
+ * Interpolate payment methods custom page URL.
+ *
+ * @param bool|FALSE $form_redirect
+ * @return array|string
+ */
+function braintree_payment_methods_custom_page($form_redirect = FALSE, $render = FALSE) {
+  $path = variable_get('braintree_payment_methods_custom_page', 'user');
+  $options = array();
+
+  if (strpos($path, '#') !== FALSE) {
+    list($path, $fragment) = explode('#', $path, 2);
+    // If $options contains no fragment, take it over from the path.
+    if (isset($fragment)) {
+      $options ['fragment'] = $fragment;
+    }
+  }
+
+  if ($form_redirect) {
+    return array(
+      $path,
+      'options' => $options,
+    );
+  }
+
+  if (!empty($options) && !$render) {
+    $options['path'] = $path;
+    return $options;
+  }
+
+  return $render ? url($path, $options) : $path;
+}
+
+/**
+ * Save customer record to Braintree vault.
+ *
+ * @param $customer_data
+ * @param array $context
+ * @param string $error_message
+ * @return bool|\Braintree_Customer
+ */
+function braintree_vault_customer_save($customer_data, $context = array(), &$error_message = '') {
+  drupal_alter('braintree_vault_customer_data', $customer_data, $context);
+  braintree_df($customer_data, 'braintree_vault_customer_save $customer_data');
+  try {
+    // Execute the API sale method to create a sale object.
+    $result = Braintree_Customer::create($customer_data);
+  }
+  catch (Exception $e) {
+    braintree_last_error($e);
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+  braintree_df($result, 'braintree_vault_customer_save $result');
+  if ($result->success) {
+    // Invoke post hook when sale is completed successfully.
+    foreach (module_implements('braintree_vault_customer_saved') as $module) {
+      $function = $module . '_braintree_vault_customer_saved';
+      $function($result, $context);
+    }
+
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Save payment method to Braintree vault.
+ *
+ * @param $payment_method
+ * @param array $context
+ * @param string $error_message
+ * @return bool|mixed
+ */
+function braintree_vault_payment_method_save($payment_method, $context = array(), &$error_message = '') {
+  drupal_alter('braintree_payment_method', $payment_method, $context);
+
+  try {
+    $params = array();
+    if (isset($context['options'])) {
+      $params['options'] = $context['options'];
+    }
+
+    if ($context['op'] == 'edit') {
+      $params['paymentMethodNonce'] = $payment_method['paymentMethodNonce'];
+
+      $result = Braintree_PaymentMethod::update($payment_method['paymentMethodToken'], $params);
+    }
+    else {
+      $params['customerId'] = $payment_method['customerId'];
+      $params['paymentMethodNonce'] = $payment_method['paymentMethodNonce'];
+
+      $result = Braintree_PaymentMethod::create($params);
+    }
+  }
+  catch (Exception $e) {
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    global $user;
+    braintree_customer_cache_reset($user->uid);
+
+    // Invoke post hook when sale is completed successfully.
+    foreach (module_implements('braintree_vault_payment_method_saved') as $module) {
+      $function = $module . '_braintree_vault_payment_method_saved';
+      $function($result, $context);
+    }
+
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Delete payment method from Brantree vault.
+ *
+ * @param $payment_method
+ * @param array $context
+ * @param string $error_message
+ * @return bool|\Braintree_Result_Successful
+ */
+function braintree_vault_payment_method_delete($payment_method, $context = array(), &$error_message = '') {
+  try {
+    $result = Braintree_PaymentMethod::delete($payment_method->token);
+  }
+  catch (Exception $e) {
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    global $user;
+    braintree_customer_cache_reset($user->uid);
+
+    // Invoke post hook when sale is completed successfully.
+    foreach (module_implements('braintree_vault_payment_method_delete') as $module) {
+      $function = $module . '_braintree_vault_payment_method_delete';
+      $function($result, $context);
+    }
+
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Change default payment method from Brantree vault.
+ *
+ * @param \Braintree\PayPalAccount|\Braintree\CreditCard $payment_method
+ *   An object of Braintree payment method.
+ * @param array $context
+ *   An associative array of context.
+ * @param string $error_message
+ *   A reference of error message.
+ *
+ * @return bool|\Braintree\Result\Successful
+ */
+function braintree_vault_payment_method_make_default($payment_method, $context = array(), &$error_message = '') {
+  if (braintree_payment_method_is_paypal($payment_method)) {
+    $class = 'Braintree_PayPalAccount';
+  }
+  else {
+    $class = 'Braintree_PaymentMethod';
+  }
+
+  try {
+    $result = $class::update($payment_method->token, array(
+      'options' => array('makeDefault' => TRUE),
+    ));
+  }
+  catch (Exception $e) {
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    // Also update subscription payment method token to default.
+    global $user;
+
+    // Braintree makeDefault method only changes default payment method for
+    // future payment. For existing subscriptions, we need update payment
+    // method token of subscription manually.
+    $customer = braintree_customer_load_by_account($user);
+    $subscriptions = braintree_customer_subscriptions($customer);
+
+    foreach ($subscriptions as $subscription) {
+      if ($subscription->paymentMethodToken == $payment_method->token) {
+        continue;
+      }
+
+      $subscription_data = array(
+        'paymentMethodToken' => $payment_method->token,
+      );
+      $context = array('function' => 'braintree_payment_method_make_default_form_submit');
+      braintree_subscription_update($subscription->id, $subscription_data, $context, $error_message);
+    }
+
+    braintree_customer_cache_reset($user->uid);
+
+    // Invoke post hook when sale is completed successfully.
+    foreach (module_implements('braintree_vault_payment_method_make_default') as $module) {
+      $function = $module . '_braintree_vault_payment_method_make_default';
+      $function($result, $context);
+    }
+
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Return subscription of customer.
+ *
+ * @param $customer
+ * @param bool|FALSE $reset
+ * @return mixed
+ *
+ * @deprecated
+ */
+function braintree_customer_default_subscription($customer, $reset = FALSE) {
+  return static_cache_get(__FUNCTION__, $customer->id, $reset, 'braintree_find_default_subscription', array($customer->paymentMethods));
+}
+
+/**
+ * @param $payment_methods
+ * @return bool|mixed|null
+ *
+ * @deprecated
+ */
+function braintree_find_default_subscription($payment_methods) {
+  $all = array();
+
+  foreach ($payment_methods as $_payment_method) {
+    if (!empty($_payment_method->subscriptions)) {
+      $all = array_merge($all, $_payment_method->subscriptions);
+    }
+  }
+
+  if (empty($all)) {
+    return FALSE;
+  }
+  // Do it quick!!!
+  elseif (count($all) == 1) {
+    return reset($all);
+  }
+
+  // Sort all subscription by created time.
+  usort($all, function($a, $b) {
+    return $a->createdAt < $b->createdAt ? -1 : 1;
+  });
+
+  // Make the most recent first.
+  $all = array_reverse($all);
+
+  $find = NULL;
+
+  foreach ($all as $_subscription) {
+    if ($_subscription != Braintree_Subscription::CANCELED) {
+      $find = $_subscription;
+      break;
+    }
+  }
+
+  if (is_null($find)) {
+    $find = reset($all);
+  }
+
+  return $find;
+}

@@ -1,0 +1,6 @@
+name = Braintree Webhooks
+description = Receive incoming Braintree webhooks and queue them for later processing
+package = Braintree
+core = 7.x
+dependencies[] = braintree
+dependencies[] = shift_queue

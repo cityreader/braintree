@@ -1,0 +1,84 @@
+#payment-details .form-item {
+  margin: 0px;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+#payment-details #edit-commerce-payment-payment-details-braintree-number {
+  width: 16em;
+  margin-top: 10px;
+  margin-right: 10px;
+}
+
+#payment-details .commerce-credit-card-expiration {
+  margin-top: 10px;
+  margin-right: 10px;
+}
+
+#payment-details .commerce-month-year-divider {
+  display: inline-block;
+  vertical-align: bottom;
+  margin: 0px 5px 0px 2px;
+}
+
+#payment-details #edit-commerce-payment-payment-details-braintree-cvv {
+  margin-top: 10px;
+  width: 82px;
+}
+
+.braintree-hosted-field {
+  height: 1.2em;
+  border: 1px solid #D6D2C4;
+  padding: 4px;
+  background: #FFF;
+  box-sizing: content-box;
+}
+
+#expiration-month {
+  width: 6em;
+}
+
+#expiration-year {
+  width: 6em;
+}
+
+#cvv {
+  width: 5em;
+}
+
+.braintree-hosted-fields-focused {
+  border-color: #777;
+}
+
+.braintree-hosted-fields-invalid {
+  border-color: red;
+}
+
+.braintree-hosted-fields-valid {
+  border-color: limegreen;
+}
+
+.payment-details-method-title {
+  font-weight: bold;
+}
+
+#paypal-container {
+  margin-top: 1em;
+}
+
+body.using-existing-payment-method #braintree-payment-form-outer {
+  display: none;
+}
+
+#payment-details .form-item-commerce-payment-payment-details-braintree-payment-method-token {
+  display: none;
+}
+
+body.using-existing-payment-method #payment-details .form-item-commerce-payment-payment-details-braintree-payment-method-token {
+  display: block;
+}
+
+.braintree-payment-toggle-link {
+  clear: both;
+  margin-top: 1rem;
+}

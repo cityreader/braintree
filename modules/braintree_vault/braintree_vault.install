@@ -1,0 +1,12 @@
+<?php
+
+/**
+ * Implements hook_uninstall().
+ */
+function braintree_vault_uninstall() {
+  variable_del('braintree_use_vault');
+  variable_del('braintree_vault_field');
+  variable_del('braintree_payment_base_url');
+  variable_del('braintree_use_payment_methods_page');
+  variable_del('braintree_payment_methods_custom_page');
+}

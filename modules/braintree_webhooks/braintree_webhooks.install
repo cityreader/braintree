@@ -1,0 +1,27 @@
+<?php
+
+/**
+ * Implements hook_install().
+ */
+function braintree_webhooks_install() {
+  // Alert the admin that a token needs to be generated for the module to work
+  if (!variable_get('braintree_webhooks_token', FALSE)) {
+    drupal_set_message('Please visit ' . BRAINTREE_ADMIN_PATH . '/webhooks to set an access token for Braintree webhooks.');
+  }
+
+  variable_set('queue_class_' . BRAINTREE_WEBHOOKS_QUEUE, 'ShiftQueue');
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function braintree_webhooks_uninstall() {
+  variable_del('braintree_webhooks_token');
+}
+
+/**
+ * Enable integration with shift_queue.
+ */
+function braintree_webhooks_update_7100() {
+  variable_set('queue_class_' . BRAINTREE_WEBHOOKS_QUEUE, 'ShiftQueue');
+}

@@ -1,0 +1,315 @@
+<?php
+/**
+ * @file
+ * Provides Braintree subscription integration.
+ */
+
+require_once dirname(__FILE__) . '/includes/commerce.inc';
+
+/**
+ * Implements hook_menu().
+ */
+function braintree_subscription_menu() {
+  $items[BRAINTREE_ADMIN_PATH . '/subscription'] = array(
+    'title' => 'Braintree subscription',
+    'description' => 'Braintree subscription settings.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('braintree_subscription_admin_settings'),
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree_subscription.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 20,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_hook_info().
+ */
+function braintree_subscription_hook_info() {
+  $hooks = array(
+    'braintree_subscription_in_order_alter',
+    'braintree_subscription_data_alter',
+    'braintree_subscription_saved',
+    'braintree_subscription_cancel',
+  );
+  foreach ($hooks as $hook) {
+    $hook_info[$hook] = array(
+      'group' => 'braintree',
+    );
+  };
+  return $hook_info;
+}
+
+function braintree_subscription_product_type_js($form, $form_state) {
+  return $form['subscription'];
+}
+
+/**
+ * Check a subscription product is added inside an order.
+ *
+ * @param $order
+ * @return bool
+ */
+function braintree_subscription_in_order($order) {
+  $use_subscription = FALSE;
+  drupal_alter('braintree_subscription_in_order', $order, $use_subscription);
+  return $use_subscription;
+}
+
+/**
+ * Create a Braintree subscription record via API.
+ *
+ * @param $subscription_data
+ * @param array $context
+ * @param string $error_message
+ * @return bool|\Braintree_Result_Error|\Braintree_Result_Successful
+ */
+function braintree_subscription_create(&$subscription_data, $context = array(), &$error_message = '') {
+  $context['op'] = 'create';
+
+  drupal_alter('braintree_subscription_data', $subscription_data, $context);
+  braintree_df($subscription_data, 'braintree_subscription_create $subscription_data');
+  if (empty($subscription_data['planId'])) {
+    $error_message = 'No plan selected';
+    return FALSE;
+  }
+
+  try {
+    // Execute the API sale method to create a sale object.
+    $result = Braintree_Subscription::create($subscription_data);
+  }
+  catch (Exception $e) {
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    // Invoke post hook when subscription is created successfully.
+    foreach (module_implements('braintree_subscription_saved') as $module) {
+      $function = $module . '_braintree_subscription_saved';
+      $function($result, $context);
+    }
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Update Braintree subscription record via API.
+ *
+ * @param $id
+ * @param $subscription_data
+ * @param array $context
+ * @param string $error_message
+ * @return bool|\Braintree_Result_Error|\Braintree_Result_Successful
+ */
+function braintree_subscription_update($id, $subscription_data, &$context = array(), &$error_message = '') {
+  $context['op'] = 'update';
+  drupal_alter('braintree_subscription_data', $subscription_data, $context);
+
+  try {
+    $result = Braintree_Subscription::update($id, $subscription_data);
+  }
+  catch(Exception $e) {
+    braintree_last_error($e);
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    // Invoke post hook when subscription is updated successfully.
+    foreach (module_implements('braintree_subscription_saved') as $module) {
+      $function = $module . '_braintree_subscription_saved';
+      $function($result, $context);
+    }
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+/**
+ * Cancel Braintree subscription via API.
+ *
+ * @param $id
+ * @param array $context
+ * @param string $error_message
+ * @return bool|\Braintree_Result_Error|\Braintree_Result_Successful
+ */
+function braintree_subscription_cancel($id, &$context = array(), &$error_message = '') {
+  try {
+    $result = Braintree_Subscription::cancel($id);
+  }
+  catch(Exception $e) {
+    braintree_last_error($e);
+    $error_message = braintree_exception_error_message($e);
+    return FALSE;
+  }
+
+  if ($result->success) {
+    global $user;
+    braintree_customer_cache_reset($user->uid);
+
+    // Invoke post hook when subscription is updated successfully.
+    foreach (module_implements('braintree_subscription_cancel') as $module) {
+      $function = $module . '_braintree_subscription_cancel';
+      $function($result, $context);
+    }
+    return $result;
+  }
+
+  $error_message = braintree_result_error_message($result);
+  return FALSE;
+}
+
+function braintree_subscription_find($subscription_id) {
+  try {
+    // Execute the API sale method to create a sale object.
+    $subscription = Braintree_Subscription::find($subscription_id);
+  }
+  catch (Exception $e) {
+    braintree_last_error($e);
+    return FALSE;
+  }
+
+  return $subscription;
+}
+
+/**
+ * Look up Braintree Subscription.
+ *
+ * @param string $field
+ *   A string of field name.
+ * @param string $value
+ *   A string of keyword to search.
+ * @param string $operator
+ *   A string of operator, could be
+ *    - is
+ *    - isNot
+ *    - startsWith
+ *    - endsWith
+ *    - contains
+ *
+ * @return \Braintree\ResourceCollection|false
+ */
+function braintree_subscription_search($field, $value, $operator = 'startsWith') {
+  try {
+    $collection = Braintree_Subscription::search(array(
+      Braintree_SubscriptionSearch::$field()->{$operator}($value),
+    ));
+  }
+  catch (Exception $e) {
+    braintree_last_error($e);
+    return FALSE;
+  }
+
+  return $collection;
+}
+
+/**
+ * Find customer ID from subscription.
+ *
+ * @param $subscription
+ * @return null
+ */
+function braintree_subscription_customer_id($subscription) {
+  $transactions = $subscription->transactions;
+  if (empty($transactions)) {
+    return NULL;
+  }
+
+  $transaction = array_pop($transactions);
+  return $transaction->customerDetails->id;
+}
+
+/**
+ * Return all subscriptions of a customer.
+ *
+ * @param $customer_id
+ *
+ * @return array
+ *   An associative array with 'subscription ID' / subscription pairs.
+ */
+function braintree_customer_subscriptions($customer_id) {
+  if (is_string($customer_id)) {
+    $customer = braintree_customer_load($customer_id);
+  }
+  else {
+    $customer = $customer_id;
+    $customer_id = $customer->id;
+  }
+
+  $subscriptions = array();
+
+  if (empty($customer->paymentMethods)) {
+    return $subscriptions;
+  }
+
+  foreach ($customer->paymentMethods as $_payment_method) {
+    if (empty($_payment_method->subscriptions)) {
+      continue;
+    }
+
+    foreach ($_payment_method->subscriptions as $_subscription) {
+      if (!braintree_subscription_is_voided($_subscription)) {
+        $subscriptions[$_subscription->id] = $_subscription;
+      }
+    }
+  }
+
+  return $subscriptions;
+}
+
+/**
+ * Check subscription is voided.
+ *
+ * @param $subscription
+ *
+ * @return bool
+ */
+function braintree_subscription_is_voided($subscription) {
+  return in_array($subscription->status, [
+    Braintree_Subscription::CANCELED,
+    Braintree_Subscription::EXPIRED
+  ]);
+}
+
+/**
+ * Convert Braintree subscription object to array.
+ *
+ * As Subscription data in webhook is an array instead of object, so we use
+ * this function to make data consistent.
+ *
+ * @param array|\Braintree\Subscription $subscription
+ *
+ * @return array
+ *   An associative array with field name/value pairs of subscription.
+ */
+function braintree_subscription_to_array($subscription) {
+  if (is_array($subscription)) {
+    return $subscription;
+  }
+
+  $fields = array(
+    'addOns', 'balance', 'billingDayOfMonth', 'billingPeriodEndDate',
+    'billingPeriodStartDate', 'createdAt', 'updatedAt', 'currentBillingCycle',
+    'daysPastDue', 'discounts', 'failureCount', 'firstBillingDate', 'id',
+    'merchantAccountId', 'neverExpires', 'nextBillAmount',
+    'nextBillingPeriodAmount', 'nextBillingDate', 'numberOfBillingCycles',
+    'paidThroughDate', 'paymentMethodToken', 'planId', 'price', 'status',
+    'trialDuration', 'trialDurationUnit', 'trialPeriod', 'descriptor',
+    'transactions', 'statusHistory'
+  );
+
+  $result = [];
+  foreach ($fields as $field) {
+    $result[$field] = $subscription->$field;
+  }
+
+  return $result;
+}

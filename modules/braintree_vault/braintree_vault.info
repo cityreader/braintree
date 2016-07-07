@@ -1,0 +1,6 @@
+name = Braintree Vault
+description = Store customer and payment methods to Braintree vault.
+package = Braintree
+core = 7.x
+dependencies[] = braintree
+dependencies[] = braintree_payment

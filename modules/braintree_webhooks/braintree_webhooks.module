@@ -1,0 +1,353 @@
+<?php
+/**
+ * @file
+ * Provides integration with Braintree webhooks.
+ */
+
+use Braintree\WebhookNotification;
+
+define('BRAINTREE_WEBHOOKS_HANDLED', 1);
+define('BRAINTREE_WEBHOOKS_ERROR', 2);
+
+define('BRAINTREE_WEBHOOKS_QUEUE', 'braintree_webhooks_queue');
+
+define('BRAINTREE_WEBHOOKS_DECODE_URL', BRAINTREE_ADMIN_PATH . '/webhooks/decode');
+
+/**
+ * Implements hook_help().
+ */
+function braintree_webhooks_help($path, $arg) {
+  switch ($path) {
+    // Main module help for admin settings page
+    case BRAINTREE_ADMIN_PATH . '/webhooks':
+      return '<p>' . t('Generate a token for securing webhook access') . '</p>';
+  }
+}
+
+/**
+ * Implements hook_menu().
+ */
+function braintree_webhooks_menu() {
+  $items[BRAINTREE_ADMIN_PATH . '/webhooks'] = array(
+    'title' => 'Braintree webhooks',
+    'description' => 'Generate a token for securing webhook access',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('braintree_webhooks_admin_settings'),
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree_webhooks.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 30,
+  );
+
+  $items[BRAINTREE_ADMIN_PATH . '/webhooks/settings'] = array(
+    'title' => 'Settings',
+    'description' => 'Generate a token for securing webhook access',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => 0,
+  );
+
+  $items[BRAINTREE_ADMIN_PATH . '/webhooks/sample'] = array(
+    'title' => 'Sample',
+    'description' => 'Show Braintree webhook sample notifications',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('braintree_webhooks_admin_sample'),
+    'type' => MENU_LOCAL_TASK,
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree_webhooks.admin.inc',
+    'weight' => 10,
+  );
+
+  $items[BRAINTREE_WEBHOOKS_DECODE_URL] = array(
+    'title' => 'Notification decode',
+    'description' => 'Decode webhook notification returns',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('braintree_webhooks_admin_decode'),
+    'type' => MENU_LOCAL_TASK,
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree_webhooks.admin.inc',
+    'weight' => 20,
+  );
+
+  $items[BRAINTREE_ADMIN_PATH . '/webhooks/queue'] = array(
+    'title' => 'Queue',
+    'description' => 'View queue items',
+    'page callback' => 'braintree_webhooks_view_queue',
+    'type' => MENU_LOCAL_TASK,
+    'access arguments' => array('administer braintree settings'),
+    'file' => 'braintree_webhooks.queue.inc',
+    'weight' => 30,
+  );
+
+  $items['braintree_webhooks/%'] = array(
+    'title' => 'Braintree webhook endpoint',
+    'page callback' => 'braintree_webhooks_listener',
+    'page arguments' => array(1),
+    'access callback' => 'braintree_webhooks_endpoint_access',
+    'access arguments' => array(1),
+    'delivery callback' => 'braintree_webhooks_deliver_response',
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_hook_info().
+ */
+function braintree_webhooks_hook_info() {
+  $hooks = array(
+    'braintree_webhooks_handle',
+  );
+  foreach ($hooks as $hook) {
+    $hook_info[$hook] = array(
+      'group' => 'braintree',
+    );
+  };
+  return $hook_info;
+}
+
+/**
+ * Access callback to Braintree webhooks endpoints.
+ *
+ * @param $token
+ * @return bool
+ */
+function braintree_webhooks_endpoint_access($token) {
+  $stored_token = variable_get('braintree_webhooks_token', FALSE);
+  return ($stored_token && $token === $stored_token);
+}
+
+/**
+ * Delivery callback for Braintree webhooks listener.
+ *
+ * @param int $page_callback_result
+ *   - 1: success
+ *   - 2: error
+ *
+ * @see braintree_webhooks_listener()
+ */
+function braintree_webhooks_deliver_response($page_callback_result) {
+  drupal_add_http_header('Content-Type', 'text/html; charset=utf-8');
+
+  // Menu status constants are integers; page content is a string or array.
+  if (!is_int($page_callback_result)) {
+    // Something went wrong
+    $page_callback_result = BRAINTREE_WEBHOOKS_ERROR;
+  }
+
+  // Handle the possible success/failures
+  switch ($page_callback_result) {
+    case BRAINTREE_WEBHOOKS_HANDLED:
+      // Print a bare 200 response
+      drupal_add_http_header('Status', '200 OK');
+      print 'OK';
+      break;
+
+    case BRAINTREE_WEBHOOKS_ERROR:
+      // Print a bare 503 response
+      drupal_add_http_header('Status', '500 Internal server error');
+      print 'Internal server error';
+      break;
+  }
+
+  if (variable_get('braintree_webhooks_debug', 0)) {
+    $log = 'Debug: result: ' . $page_callback_result . '<br>';
+    $log .= '$_SERVER: <br>';
+    $log .= '<pre>' . print_r($_SERVER, true) . '</pre><br>';
+    $log .= '$_GET: <br>';
+    $log .= '<pre>' . print_r($_GET, true) . '</pre><br>';
+    $log .= '$_POST: <br>';
+    $log .= '<pre>' . print_r($_POST, true) . '</pre><br>';
+    watchdog('braintree_webhooks', $log, array(), WATCHDOG_DEBUG);
+  }
+
+  // Perform end-of-request tasks.
+  drupal_page_footer();
+}
+
+/**
+ * Page callback; listen to Braintree Webhooks notifications and save to queue.
+ *
+ * Note this page will be rendered in braintree_webhooks_deliver_response() in
+ * stead of normal delivery callback.
+ *
+ * @return int
+ *   - 1: success
+ *   - 2: error
+ *
+ * @throws \Braintree\Exception\InvalidChallenge
+ *
+ * @see braintree_webhooks_deliver_response()
+ */
+function braintree_webhooks_listener() {
+  // Special format used to verify during webhook creation
+  if(isset($_GET["bt_challenge"])) {
+    braintree_initialize();
+    $response = WebhookNotification::verify($_GET["bt_challenge"]);
+    print $response;
+    return BRAINTREE_WEBHOOKS_HANDLED;
+  }
+
+  // This is an actual incoming webhook
+  if(isset($_POST["bt_signature"]) && isset($_POST["bt_payload"])) {
+    // Defer the actual decrypting of the message until processing
+    $data = array(
+      'bt_signature' => $_POST['bt_signature'],
+      'bt_payload'   => $_POST['bt_payload'],
+    );
+
+    // Create a queue item from the incoming message
+    $queue = DrupalQueue::get(BRAINTREE_WEBHOOKS_QUEUE);
+
+    // Store the webhook payload for later processing, as we may receive large
+    // volumes of incoming messages during billing runs, etc
+    if ($queue->createItem($data)) {
+      return BRAINTREE_WEBHOOKS_HANDLED;
+    }
+  }
+
+  // Log the failure
+
+  return BRAINTREE_WEBHOOKS_ERROR;
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function braintree_webhooks_cron_queue_info() {
+  $queues[BRAINTREE_WEBHOOKS_QUEUE] = array(
+    'worker callback' => 'braintree_webhooks_process_queue_item',
+    'time' => 120, // Max execution time is 240 in Drupal cron.
+  );
+  return $queues;
+}
+
+/**
+ * Queue worker for Braintree webhooks queue.
+ *
+ * @param array $data
+ *   An array of Drupal Queue item data.
+ *
+ * @throws \Braintree\Exception\InvalidSignature
+ */
+function braintree_webhooks_process_queue_item($data) {
+  // Prepare the Braintree library to process items from the queue
+  braintree_initialize();
+
+  // Decode the message
+  $webhookNotification = WebhookNotification::parse($data['bt_signature'], $data['bt_payload']);
+
+  // Allow any module to handle messages they're interested in
+  foreach (module_implements('braintree_webhooks_handle') as $module) {
+    $function = $module  . '_braintree_webhooks_handle';
+
+    // Allow any module to handle messages they're interested in
+    $function($webhookNotification->kind, $webhookNotification->subject, $webhookNotification->timestamp, $data);
+  }
+}
+
+/**
+ * Return all kinds of webhooks.
+ */
+function braintree_webhooks_kinds() {
+  return array(
+    WebhookNotification::SUBSCRIPTION_CANCELED,
+    WebhookNotification::SUBSCRIPTION_CHARGED_SUCCESSFULLY,
+    WebhookNotification::SUBSCRIPTION_CHARGED_UNSUCCESSFULLY,
+    WebhookNotification::SUBSCRIPTION_EXPIRED,
+    WebhookNotification::SUBSCRIPTION_TRIAL_ENDED,
+    WebhookNotification::SUBSCRIPTION_WENT_ACTIVE,
+    WebhookNotification::SUBSCRIPTION_WENT_PAST_DUE,
+    WebhookNotification::SUB_MERCHANT_ACCOUNT_APPROVED,
+    WebhookNotification::SUB_MERCHANT_ACCOUNT_DECLINED,
+    WebhookNotification::TRANSACTION_DISBURSED,
+    WebhookNotification::DISBURSEMENT_EXCEPTION,
+    WebhookNotification::DISBURSEMENT,
+    WebhookNotification::DISPUTE_OPENED,
+    WebhookNotification::DISPUTE_LOST,
+    WebhookNotification::DISPUTE_WON,
+    WebhookNotification::PARTNER_MERCHANT_CONNECTED,
+    WebhookNotification::PARTNER_MERCHANT_DISCONNECTED,
+    WebhookNotification::PARTNER_MERCHANT_DECLINED,
+    WebhookNotification::CHECK,
+  );
+}
+
+/**
+ * Return trigger source of webhook trigger events.
+ *
+ * @param $kind
+ * @param $subject
+ * @return mixed
+ *   Valid source
+ *     - \Braintree\Subscription::CONTROL_PANEL
+ *     - \Braintree\Subscription::API
+ *     - \Braintree\Subscription::RECURRING
+ */
+function braintree_webhooks_trigger_source($kind, $subject) {
+  $types = array(
+    'subscription_charged' => 'subscription',
+    'subscription' => 'subscription',
+//    'sub_merchant_account',
+//    'transaction',
+//    'disbursement',
+//    'dispute',
+//    'partner_merchant',
+  );
+
+  $kind = strtolower($kind);
+  foreach ($types as $type => $object) {
+    if (strpos($kind, $type) === 0) {
+      break;
+    }
+  }
+
+  $source = '';
+
+  switch($type) {
+    case 'subscription':
+    case 'subscription_charged':
+      $history = braintree_latest_status($subject[$object]['statusHistory']);
+      $source = $history['subscriptionSource'];
+      break;
+
+    default:
+      // @todo implement check for other types.
+      break;
+  }
+
+  return $source;
+}
+
+/**
+ * Return most recent status from history.
+ *
+ * Order of status history is random in Braintree. In some case, last comes
+ * first, and in other case last comes in the end of status history array. So
+ * we have to compare date.
+ *
+ * @param array $status_history
+ *
+ * @return array
+ */
+function braintree_latest_status($status_history) {
+  uasort($status_history, function($a, $b) {
+    return $a['timestamp'] < $b['timestamp'] ? -1 : 1;
+  });
+
+  return end($status_history);
+}
+
+/**
+ * Return most recent transaction from subscrption.
+ *
+ * @param array $transactions
+ *
+ * @return array
+ */
+function braintree_latest_transaction($transactions) {
+  uasort($transactions, function($a, $b) {
+    return $a['createdAt'] < $b['createdAt'] ? -1 : 1;
+  });
+
+  return end($transactions);
+}
