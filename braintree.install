@@ -1,6 +1,11 @@
 <?php
 
 /**
+ * @file
+ * Install, update and uninstall functions for the Braintree module.
+ */
+
+/**
  * Implements hook_uninstall().
  */
 function braintree_uninstall() {

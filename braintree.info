@@ -1,5 +1,5 @@
 name = Braintree
-description = Provide Braintree core function.
+description = Provide API integration with Braintree payment gateway.
 package = Braintree
 core = 7.x
 dependencies[] = libraries
